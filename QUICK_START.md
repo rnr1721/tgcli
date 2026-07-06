@@ -65,6 +65,19 @@ python3 telegram_tool.py dialogs 50 groups
 python3 telegram_tool.py dialogs 50 users
 ```
 
+### List saved contacts
+```bash
+python3 telegram_tool.py contacts
+```
+
+### Find who to write to (by name, username, or id)
+```bash
+python3 telegram_tool.py resolve Alena
+python3 telegram_tool.py resolve @username
+```
+Searches contacts and all dialogs. Prints candidates with a match count.
+Use it to confirm a target exists before sending.
+
 ### Read a conversation
 ```bash
 python3 telegram_tool.py read @username
@@ -102,7 +115,10 @@ python3 telegram_tool.py me
 
 ## Important notes
 
-- Use `dialogs` first to discover @usernames and numeric ids of chats
+- Use `dialogs` to see existing chats, or `resolve <name>` to find a specific target
+- Before sending to someone, use `resolve` to confirm they exist and get the exact address
+- `resolve` searches both your contacts and all dialogs — people, groups, and channels
+- If `resolve` returns `matches: 0`, that target isn't in the account — don't guess an address
 - If a chat has no @username, use its numeric id instead (shown in `dialogs` output)
 - Both @username and numeric id work for read, send, search, info, and mark_read
 - Do not run `auth` — it requires interactive input and is for the start only

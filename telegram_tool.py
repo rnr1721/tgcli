@@ -158,6 +158,117 @@ async def resolve_entity(client, target):
 
         raise first_error
 
+# -- Contact / entity resolution ----------------------------------------------
+
+async def _iter_contacts(client):
+    """Yield User entities from the account's address book."""
+    from telethon.tl.functions.contacts import GetContactsRequest
+    result = await client(GetContactsRequest(hash=0))
+    for user in result.users:
+        yield user
+
+
+def _display_name(e):
+    """Human-readable name for any entity type."""
+    if isinstance(e, User):
+        name = f"{e.first_name or ''} {e.last_name or ''}".strip()
+        return name or (f'@{e.username}' if e.username else str(e.id))
+    return getattr(e, 'title', None) or str(e.id)
+
+
+def _match_score(query, e):
+    """
+    Cheap fuzzy match. Returns True if query plausibly refers to this entity.
+    Matches against name, username, and id — case-insensitive, substring-based.
+    Intentionally permissive: the tool surfaces candidates, the agent decides.
+    """
+    q = query.lower().lstrip('@').strip()
+    if not q:
+        return False
+
+    haystack = []
+    if isinstance(e, User):
+        haystack += [e.first_name or '', e.last_name or '',
+                     f"{e.first_name or ''} {e.last_name or ''}".strip()]
+    else:
+        haystack.append(getattr(e, 'title', '') or '')
+    if getattr(e, 'username', None):
+        haystack.append(e.username)
+    haystack.append(str(e.id))
+
+    return any(q in h.lower() for h in haystack if h)
+
+
+async def cmd_contacts(*words):
+    """List the account's address book (saved contacts)."""
+    async with make_client() as client:
+        print(f"\n{'-'*62}")
+        print(f"  CONTACTS")
+        print(f"{'-'*62}")
+
+        count = 0
+        async for user in _iter_contacts(client):
+            ref  = entity_ref(user)
+            name = _display_name(user)
+            print(f"[user] {name:<30} id: {user.id:<14} {ref if ref.startswith('@') else '(no username)'}")
+            count += 1
+
+        print(f"{'-'*62}")
+        print(f"  Total: {count}")
+
+
+async def cmd_resolve(*words):
+    """
+    Resolve a free-form query to real, addressable targets in this account.
+    Searches contacts AND all dialogs (users, groups, channels).
+    Prints a compact, machine-readable candidate list with an explicit count.
+
+    This is the verification point: the agent may know WHO to write from any
+    context (memory, documents, the conversation) — but before sending it
+    confirms the target actually exists here and gets its canonical address.
+    """
+    query = ' '.join(words).strip()
+    if not query:
+        print("[resolve] query: \"\" — matches: 0 (empty query)")
+        return
+
+    async with make_client() as client:
+        seen    = set()
+        matches = []
+
+        # 1. Address book
+        async for user in _iter_contacts(client):
+            if _match_score(query, user) and user.id not in seen:
+                seen.add(user.id)
+                matches.append(('contact', user))
+
+        # 2. All dialogs (users, groups, channels)
+        async for dialog in client.iter_dialogs():
+            e = dialog.entity
+            if e.id in seen:
+                continue
+            if _match_score(query, e):
+                seen.add(e.id)
+                kind = 'dialog'
+                matches.append((kind, e))
+
+        n = len(matches)
+        print(f"[resolve] query: \"{query}\" — matches: {n}"
+              + ("" if n else " (not found in contacts or dialogs)"))
+
+        if n == 0:
+            print("  This target does not exist in the account. "
+                  "The request may rest on a wrong assumption — report it rather than guess.")
+            return
+
+        print()
+        for i, (source, e) in enumerate(matches, 1):
+            ref  = entity_ref(e)
+            addr = ref if ref.startswith('@') else f"id: {e.id}"
+            name = _display_name(e)
+            icon = entity_icon(e)
+            uname = f"  {ref}" if ref.startswith('@') else "  (no username)"
+            print(f"  {i}. {icon} {name:<28} id: {e.id:<14}{uname}  [{source}]")
 
 # -- Commands -----------------------------------------------------------------
 
@@ -514,6 +625,8 @@ HELP = """
 Telegram Tool — commands:
 
   dialogs   [N] [users|groups|channels]  List dialogs (up to N, default 30)
+  contacts                               List saved contacts (address book)
+  resolve   <query...>                   Find real targets by name/@username/id
   read      <@chat|id> [N]               Last N messages (default 15)
   send      <@user|id> <text...>         Send a message
   unread    [N]                          Dialogs with unread messages
@@ -555,6 +668,8 @@ Examples:
 
 COMMANDS = {
     'dialogs':       cmd_dialogs,
+    'contacts':      cmd_contacts,
+    'resolve':       cmd_resolve,
     'read':          cmd_read,
     'send':          cmd_send,
     'unread':        cmd_unread,
