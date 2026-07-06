@@ -114,6 +114,40 @@ Output shows type icon, name, `@username` or id (for use in other commands), dat
 
 ---
 
+### `contacts` — list saved contacts
+
+```bash
+python3 telegram_tool.py contacts
+```
+
+Prints the account's address book — everyone you've saved as a contact,
+with name, numeric id, and `@username` (if they have one).
+
+---
+
+### `resolve` — find a real target by name, username or id
+
+```bash
+python3 telegram_tool.py resolve Alena
+python3 telegram_tool.py resolve @durov
+python3 telegram_tool.py resolve 123456789
+```
+
+Searches **both** contacts and all dialogs (people, groups, and channels) for
+anything matching the query. Prints candidates with an explicit match count:
+
+```
+[resolve] query: "alena" — matches: 2
+
+  1. [user] Alena Petrova            id: 12345       @alena_p    [contact]
+  2. [user] Alena                    id: 67890       (no username)  [dialog]
+```
+
+Use this to confirm a target exists before `send` — and to get its canonical
+address. `matches: 0` means the target does not exist in this account.
+
+---
+
 ### `read` — read messages
 
 ```bash
@@ -204,8 +238,7 @@ Wherever `<@chat|id>` is expected, you can use:
 | `@username`  | `@durov`          | if the chat has a username     |
 | numeric id   | `123456789`       | if there's no username         |
 
-To find a username or id, use `dialogs` — they appear in the third column.
-
+To find a username or id, use `dialogs` (existing chats) or `resolve` (searches contacts and dialogs by name/username/id).
 ---
 
 ## File structure
@@ -235,3 +268,4 @@ telegram_auth_state.json    — temporary, only present during non-interactive a
 | `Too many requests` | Telegram FloodWait | Wait the indicated number of seconds |
 | `Could not find the input entity` | Wrong username/id or no access | Check the address, make sure you're in the chat |
 | `Please install telethon` | Library not installed | `pip install telethon` |
+| `matches: 0` | Target not in contacts or dialogs | Not an error — the target doesn't exist here; check the name |
