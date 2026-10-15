@@ -2,6 +2,10 @@
 telegram_config.json
 telegram_session.session
 telegram_auth_state.json
+updates_state.json
+telegram_session.lock
+downloads/
+
 *.session
 
 # Python
