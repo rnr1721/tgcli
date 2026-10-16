@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-__version__ = '1.1.2'
+__version__ = '1.1.3'
 
 try:
     from telethon import TelegramClient, utils
@@ -56,6 +56,8 @@ _DATA_DIR = (Path(os.environ['TELEGRAM_DATA_DIR']).resolve()
 CONFIG_FILE      = _DATA_DIR / 'telegram_config.json'
 SESSION          = str(_DATA_DIR / 'telegram_session')
 _AUTH_STATE_FILE = _DATA_DIR / 'telegram_auth_state.json'
+_QR_FILE         = _DATA_DIR / 'telegram_qr.json'
+_QR_LOG          = _DATA_DIR / 'telegram_qr.log'
 _UPDATES_STATE   = _DATA_DIR / 'updates_state.json'
 _LOCK_FILE       = _DATA_DIR / 'telegram_session.lock'
 _DOWNLOADS_DIR   = _DATA_DIR / 'downloads'
@@ -1263,6 +1265,209 @@ async def cmd_auth_password(password):
          lambda _: print(f"[OK] Authorized as {me.first_name} (@{me.username})\n"
                          f"  All commands are now available."))
 
+
+# -- QR login -----------------------------------------------------------------
+#
+# Telegram may refuse to deliver login codes to third-party clients (it says
+# "sent to the app" and nothing arrives). QR login avoids codes entirely: an
+# already logged-in Telegram app scans a token and authorizes this session.
+#
+# Telethon requires a connected client to be WAITING while the QR is scanned,
+# so a one-shot command can't do it. `auth:qr` starts a detached
+# `auth:qr:serve` process that holds the connection, refreshes the token as it
+# expires and records progress in telegram_qr.json; `auth:qr:status` reads that
+# file (no connection, no lock) — cheap enough to poll from a web UI.
+
+_QR_START_TIMEOUT = 20
+
+
+def _qr_ttl():
+    try:
+        return max(30.0, float(os.environ.get('TELEGRAM_QR_TTL', '180')))
+    except ValueError:
+        return 180.0
+
+
+def _qr_read():
+    try:
+        with open(_QR_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _qr_write(state):
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _QR_FILE.with_suffix('.tmp')
+    with open(tmp, 'w') as f:
+        json.dump(state, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, _QR_FILE)
+
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A finished child of ours lingers as a zombie until reaped — treat as dead.
+    try:
+        with open(f'/proc/{int(pid)}/stat') as f:
+            return f.read().split(')')[-1].split()[0] != 'Z'
+    except OSError:
+        return True
+
+
+def _qr_cancel():
+    """Stop a running QR login (it holds the session lock) and forget it."""
+    state = _qr_read()
+    pid = state.get('pid')
+    if state.get('status') in ('starting', 'waiting') and _pid_alive(pid):
+        import signal
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.monotonic() + 5
+        while _pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+    try:
+        _QR_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _qr_report(state):
+    """Turn the QR state file into a command result (or a CliError)."""
+    status = state.get('status')
+    if status in ('starting', 'waiting') and not _pid_alive(state.get('pid')):
+        status = 'expired'
+
+    if status == 'waiting':
+        data = {'authorized': False, 'next_step': 'qr',
+                'qr': {'url': state.get('url'), 'expires': state.get('expires')}}
+        return emit(data, lambda d: print(
+            f"[QR] Scan in Telegram → Settings → Devices → Link Desktop Device:\n  {d['qr']['url']}\n"
+            f"  Then: telegram auth:qr:status"))
+    if status == 'authorized':
+        user = state.get('user') or {}
+        return emit({'authorized': True, 'next_step': None, 'user': user},
+                    lambda _: print(f"[OK] Authorized as {user.get('first_name')} (@{user.get('username')})"))
+    if status == 'password':
+        return emit({'authorized': False, 'next_step': 'password'},
+                    lambda _: print("[2FA] QR accepted. Two-factor authentication required.\n"
+                                    "  Next step: telegram auth:password <your_password>"))
+    if status == 'starting':
+        raise CliError('QR login is still starting; try auth:qr:status again.', code='busy')
+    if status == 'error':
+        extra = {'retry_after': state['retry_after']} if state.get('retry_after') else {}
+        raise CliError(state.get('error') or 'QR login failed.', code=state.get('code') or 'error', **extra)
+    raise CliError('The QR login expired or was cancelled. Start again with auth:qr.', code='qr_expired')
+
+
+async def cmd_auth_qr():
+    """Start a QR login in the background and print the first QR link."""
+    import subprocess
+    _qr_cancel()
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_QR_LOG, 'w') as log:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.realpath(__file__), 'auth:qr:serve'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
+            start_new_session=True, close_fds=True,
+            env={**os.environ, 'TGCLI_JSON': '0'},
+        )
+    _qr_write({'status': 'starting', 'pid': proc.pid})
+
+    deadline = time.monotonic() + _QR_START_TIMEOUT
+    while time.monotonic() < deadline:
+        state = _qr_read()
+        if state.get('status') != 'starting':
+            return _qr_report(state)
+        if proc.poll() is not None:
+            break
+        await asyncio.sleep(0.2)
+
+    state = _qr_read()
+    if state.get('status') not in (None, 'starting'):
+        return _qr_report(state)
+
+    timed_out = proc.poll() is None
+    _qr_cancel()   # don't leave a stuck serve holding the session lock
+    try:
+        tail = _QR_LOG.read_text(errors='replace').strip().splitlines()[-1:]
+    except OSError:
+        tail = []
+    if timed_out:
+        raise CliError(f'Could not reach Telegram within {_QR_START_TIMEOUT}s to start the QR login.',
+                       code='unavailable')
+    raise CliError('QR login failed to start' + (f': {tail[0]}' if tail else '.'), code='error')
+
+
+async def cmd_auth_qr_status():
+    """Progress of a QR login started with auth:qr (reads a file, no network)."""
+    return _qr_report(_qr_read())
+
+
+async def cmd_auth_qr_cancel():
+    """Stop a pending QR login (it holds the session lock while waiting)."""
+    _qr_cancel()
+    emit({'cancelled': True}, lambda _: print("[OK] QR login cancelled"))
+
+
+async def cmd_auth_qr_serve():
+    """Internal: hold the connection while the QR is shown. Started by auth:qr."""
+    import signal
+    pid = os.getpid()
+    task = asyncio.current_task()
+    try:
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+    except (NotImplementedError, RuntimeError):
+        pass
+
+    deadline = time.monotonic() + _qr_ttl()
+    try:
+        async with connected(require_auth=False) as client:
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                _qr_write({'status': 'authorized', 'pid': pid, 'user': _user_brief(me)})
+                return
+
+            qr = await client.qr_login()
+            while True:
+                _qr_write({'status': 'waiting', 'pid': pid, 'url': qr.url,
+                           'expires': int(qr.expires.timestamp())})
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    _qr_write({'status': 'expired', 'pid': pid})
+                    return
+                to_expiry = (qr.expires - datetime.now(timezone.utc)).total_seconds()
+                try:
+                    user = await qr.wait(timeout=max(1.0, min(left, to_expiry)))
+                except asyncio.TimeoutError:
+                    await qr.recreate()
+                    continue
+                except SessionPasswordNeededError:
+                    _qr_write({'status': 'password', 'pid': pid})
+                    return
+                _clear_auth_state()
+                _qr_write({'status': 'authorized', 'pid': pid, 'user': _user_brief(user)})
+                return
+    except asyncio.CancelledError:
+        _qr_write({'status': 'cancelled', 'pid': pid})
+    except FloodWaitError as e:
+        _qr_write({'status': 'error', 'pid': pid, 'code': 'flood_wait', 'retry_after': e.seconds,
+                   'error': f'Too many requests, wait {e.seconds} sec.'})
+    except CliError as e:
+        _qr_write({'status': 'error', 'pid': pid, 'code': e.code, 'error': e.message})
+    except Exception as e:
+        _qr_write({'status': 'error', 'pid': pid, 'code': 'error', 'error': str(e) or e.__class__.__name__})
+
 # -- Help ---------------------------------------------------------------------
 
 HELP = f"""
@@ -1296,6 +1501,9 @@ Non-interactive authorization (for scripts and web UIs):
   auth:init <api_id> <api_hash>          Save API credentials (step 0, if needed)
   auth:phone <phone>                     Send confirmation code  (step 1)
   auth:resend                            Deliver the code another way (SMS, call)
+  auth:qr                                Log in by QR instead of a code (step 1, alt.)
+  auth:qr:status                         Check the QR login: waiting / authorized / password
+  auth:qr:cancel                         Stop a pending QR login
   auth:code  <code>                      Submit the code         (step 2)
   auth:password <password>               Submit 2FA password     (step 3, if needed)
 
@@ -1345,6 +1553,10 @@ COMMANDS = {
     'auth:init':     cmd_auth_init,
     'auth:phone':    cmd_auth_phone,
     'auth:resend':   cmd_auth_resend,
+    'auth:qr':       cmd_auth_qr,
+    'auth:qr:status': cmd_auth_qr_status,
+    'auth:qr:cancel': cmd_auth_qr_cancel,
+    'auth:qr:serve': cmd_auth_qr_serve,
     'auth:code':     cmd_auth_code,
     'auth:password': cmd_auth_password,
     'config':        cmd_config,
@@ -1367,16 +1579,21 @@ USAGE = {
     'auth:init':     'auth:init <api_id> <api_hash>',
     'auth:phone':    'auth:phone <phone>',
     'auth:resend':   'auth:resend',
+    'auth:qr':       'auth:qr',
+    'auth:qr:status': 'auth:qr:status',
+    'auth:qr:cancel': 'auth:qr:cancel',
+    'auth:qr:serve': 'auth:qr:serve (internal)',
     'auth:code':     'auth:code <code>',
     'auth:password': 'auth:password <password>',
     'config':        'config',
 }
 
 # Commands that may run without an existing session file.
-NON_SESSION_COMMANDS = {'auth', 'auth:init', 'auth:phone', 'auth:resend', 'auth:code', 'auth:password', 'config'}
+NON_SESSION_COMMANDS = {'auth', 'auth:init', 'auth:phone', 'auth:resend', 'auth:qr',
+                        'auth:qr:status', 'auth:qr:cancel', 'auth:qr:serve', 'auth:code', 'auth:password', 'config'}
 
 # Commands that never touch the session and so skip the lock.
-UNLOCKED_COMMANDS = {'config', 'auth:init'}
+UNLOCKED_COMMANDS = {'config', 'auth:init', 'auth:qr', 'auth:qr:status', 'auth:qr:cancel'}
 
 
 def main(argv):
@@ -1423,6 +1640,11 @@ def main(argv):
                 "   python3 telegram_tool.py auth\n"
                 "   or: python3 telegram_tool.py auth:phone <phone>",
                 code='no_session', exit_code=EXIT_AUTH, tag='WARN')
+
+        # A pending QR login holds the session lock — a new login attempt
+        # by phone replaces it instead of waiting for it to time out.
+        if cmd == 'auth:phone':
+            _qr_cancel()
 
         if cmd in UNLOCKED_COMMANDS:
             asyncio.run(fn(*cargs))
