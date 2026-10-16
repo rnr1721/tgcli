@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.2
+
+### Added
+- `auth:phone` reports **where the code was sent**: `code: {delivery, hint,
+  length, next_delivery, resend_after, email_pattern}`. Delivery is one of
+  `app` (in-app message from "Telegram", id 777000), `sms`, `call`,
+  `flash_call`, `missed_call`, `email`, `setup_email_required`, `fragment`.
+  The interactive `auth` wizard prints it too.
+- `auth:resend`: ask Telegram to deliver the pending code the next way
+  (usually SMS or a call) — for "the code never came".
+
 ## 1.1.0
 
 ### Added

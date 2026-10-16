@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-__version__ = '1.1.0'
+__version__ = '1.1.2'
 
 try:
     from telethon import TelegramClient, utils
@@ -1121,7 +1121,10 @@ async def cmd_auth():
             print(f"[OK] Already authorized as {me.first_name} (@{me.username})")
             return
         phone = input("[PHONE] Phone number (e.g. +19001234567): ").strip()
-        await client.send_code_request(phone)
+        sent = await client.send_code_request(phone)
+        info = _describe_sent_code(sent)
+        print(f"   Code sent {info['hint']}"
+              + (f" <{info['email_pattern']}>" if 'email_pattern' in info else ''))
         code = input("[CODE] Telegram code: ").strip()
         try:
             await client.sign_in(phone, code)
@@ -1132,6 +1135,55 @@ async def cmd_auth():
 
     print(f"\n[OK] Success! Authorized as {me.first_name} (@{me.username})")
     print("  All commands are now available without re-authorization.")
+
+
+
+_CODE_DELIVERY = {
+    'SentCodeTypeApp':               ('app',   'in the Telegram app — a message from "Telegram" (id 777000) in an already logged-in session'),
+    'SentCodeTypeSms':               ('sms',   'by SMS'),
+    'SentCodeTypeSmsWord':           ('sms',   'by SMS (a word instead of digits)'),
+    'SentCodeTypeSmsPhrase':         ('sms',   'by SMS (a phrase instead of digits)'),
+    'SentCodeTypeFirebaseSms':       ('sms',   'by SMS via Firebase — may never arrive for third-party clients; try auth:resend'),
+    'SentCodeTypeCall':              ('call',  'by a phone call (the code is dictated)'),
+    'SentCodeTypeFlashCall':         ('flash_call',  'by a flash call (the code is in the caller number)'),
+    'SentCodeTypeMissedCall':        ('missed_call', 'by a missed call (the code is the last digits of the caller number)'),
+    'SentCodeTypeEmailCode':         ('email', 'to the login email of the account'),
+    'SentCodeTypeSetUpEmailRequired':('setup_email_required', 'nowhere yet: Telegram requires a login email to be set up first (do it in an official app)'),
+    'SentCodeTypeFragmentSms':       ('fragment', 'via Fragment (anonymous number) — open fragment.com'),
+}
+
+_NEXT_TYPE = {
+    'CodeTypeSms': 'sms', 'CodeTypeCall': 'call', 'CodeTypeFlashCall': 'flash_call',
+    'CodeTypeMissedCall': 'missed_call', 'CodeTypeFragmentSms': 'fragment',
+}
+
+
+def _describe_sent_code(sent):
+    """Where Telegram sent the login code — the answer to "the code never came"."""
+    kind = type(getattr(sent, 'type', None)).__name__
+    delivery, hint = _CODE_DELIVERY.get(kind, ('unknown', f'unknown delivery ({kind})'))
+    info = {'delivery': delivery, 'hint': hint}
+    length = getattr(sent.type, 'length', None)
+    if length:
+        info['length'] = length
+    pattern = getattr(sent.type, 'email_pattern', None)
+    if pattern:
+        info['email_pattern'] = pattern
+    nxt = getattr(sent, 'next_type', None)
+    if nxt is not None:
+        info['next_delivery'] = _NEXT_TYPE.get(type(nxt).__name__, type(nxt).__name__)
+    if getattr(sent, 'timeout', None):
+        info['resend_after'] = sent.timeout
+    return info
+
+
+def _print_code_info(phone, info):
+    print(f"[OK] Code sent to {phone} {info['hint']}"
+          + (f" <{info['email_pattern']}>" if 'email_pattern' in info else ''))
+    if 'next_delivery' in info:
+        wait = f" after {info['resend_after']}s" if 'resend_after' in info else ''
+        print(f"  Not arriving? telegram auth:resend{wait} → {info['next_delivery']}")
+    print("  Next step: telegram auth:code <code>")
 
 
 async def cmd_auth_init(api_id, api_hash):
@@ -1155,9 +1207,26 @@ async def cmd_auth_phone(phone):
             return
         result = await client.send_code_request(phone)
         _save_auth_state({'phone': phone, 'phone_code_hash': result.phone_code_hash})
+        info = _describe_sent_code(result)
 
-    emit({'authorized': False, 'next_step': 'code', 'phone': phone},
-         lambda _: print(f"[OK] Code sent to {phone}\n  Next step: telegram auth:code <code>"))
+    emit({'authorized': False, 'next_step': 'code', 'phone': phone, 'code': info},
+         lambda _: _print_code_info(phone, info))
+
+
+async def cmd_auth_resend():
+    """Step 1b: ask Telegram to deliver the code another way (SMS, call...)."""
+    from telethon.tl.functions.auth import ResendCodeRequest
+    state = _load_auth_state()
+    if not state.get('phone') or not state.get('phone_code_hash'):
+        raise CliError('No pending auth state. Run auth:phone first.', code='no_auth_state')
+
+    async with connected(require_auth=False) as client:
+        result = await client(ResendCodeRequest(state['phone'], state['phone_code_hash']))
+        _save_auth_state({'phone': state['phone'], 'phone_code_hash': result.phone_code_hash})
+        info = _describe_sent_code(result)
+
+    emit({'authorized': False, 'next_step': 'code', 'phone': state['phone'], 'code': info},
+         lambda _: _print_code_info(state['phone'], info))
 
 
 async def cmd_auth_code(code):
@@ -1226,6 +1295,7 @@ Interactive authorization (run once in a terminal):
 Non-interactive authorization (for scripts and web UIs):
   auth:init <api_id> <api_hash>          Save API credentials (step 0, if needed)
   auth:phone <phone>                     Send confirmation code  (step 1)
+  auth:resend                            Deliver the code another way (SMS, call)
   auth:code  <code>                      Submit the code         (step 2)
   auth:password <password>               Submit 2FA password     (step 3, if needed)
 
@@ -1274,6 +1344,7 @@ COMMANDS = {
     'auth':          cmd_auth,
     'auth:init':     cmd_auth_init,
     'auth:phone':    cmd_auth_phone,
+    'auth:resend':   cmd_auth_resend,
     'auth:code':     cmd_auth_code,
     'auth:password': cmd_auth_password,
     'config':        cmd_config,
@@ -1295,13 +1366,14 @@ USAGE = {
     'auth':          'auth',
     'auth:init':     'auth:init <api_id> <api_hash>',
     'auth:phone':    'auth:phone <phone>',
+    'auth:resend':   'auth:resend',
     'auth:code':     'auth:code <code>',
     'auth:password': 'auth:password <password>',
     'config':        'config',
 }
 
 # Commands that may run without an existing session file.
-NON_SESSION_COMMANDS = {'auth', 'auth:init', 'auth:phone', 'auth:code', 'auth:password', 'config'}
+NON_SESSION_COMMANDS = {'auth', 'auth:init', 'auth:phone', 'auth:resend', 'auth:code', 'auth:password', 'config'}
 
 # Commands that never touch the session and so skip the lock.
 UNLOCKED_COMMANDS = {'config', 'auth:init'}
