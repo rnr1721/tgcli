@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.3
+
+### Added
+- QR login, for when Telegram won't deliver login codes to third-party
+  clients: `auth:qr` starts a detached `auth:qr:serve` process that holds the
+  connection, refreshes the token as it expires and records progress in
+  `telegram_qr.json`; `auth:qr:status` reads it (no network, no lock) —
+  `waiting` with a fresh `tg://login` link, `authorized`, or
+  `next_step: password` for 2FA accounts. `auth:qr:cancel` stops it;
+  `auth:phone` cancels a pending one. `TELEGRAM_QR_TTL` (default 180 s).
+
 ## 1.1.2
 
 ### Added

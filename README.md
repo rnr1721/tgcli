@@ -90,6 +90,31 @@ With `--json`, every step reports what comes next:
 The temporary state between steps lives in `telegram_auth_state.json` and is
 deleted after successful authorization.
 
+`auth:phone` also says **where the code went** — `code.delivery` is `app`
+(a message from "Telegram", id 777000, in a session where the account is
+logged in), `sms`, `call`, `email` (with `email_pattern`), `fragment`,
+`setup_email_required`… If it doesn't arrive, `auth:resend` asks for the next
+route when Telegram offers one (`code.next_delivery`, `code.resend_after`).
+
+### QR login (when codes don't arrive)
+
+Telegram sometimes answers "code sent to the app" for third-party clients and
+never delivers it. QR login needs no code: a phone where the account is
+already logged in scans a token.
+
+```bash
+python3 telegram_tool.py auth:qr          # starts a background waiter, prints tg://login?token=…
+# scan it: Telegram → Settings → Devices → Link Desktop Device
+python3 telegram_tool.py auth:qr:status   # waiting (fresh link) / authorized / next_step=password
+python3 telegram_tool.py auth:password …  # only with 2FA
+python3 telegram_tool.py auth:qr:cancel   # give up
+```
+
+The token is valid ~30 s; the background process (`auth:qr:serve`) refreshes it
+and keeps the connection open while you scan, for up to `TELEGRAM_QR_TTL`
+seconds. Render the link as a QR code yourself (e.g. `qrencode -t ansiutf8 'tg://…'`).
+It holds the session lock while waiting; `auth:phone` cancels it.
+
 ---
 
 ## Data directory
@@ -340,6 +365,7 @@ share one account safely.
 | `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | — | Credentials; override the config file. Set both or neither |
 | `TELEGRAM_LOCK_TIMEOUT` | 30 | Seconds to wait for a busy session |
 | `TELEGRAM_DOWNLOAD_MAX_MB` | 50 | Download cap, 0 = unlimited |
+| `TELEGRAM_QR_TTL` | 180 | How long a QR login waits for a scan, seconds |
 | `TGCLI_JSON` | — | `1` = same as `--json` |
 
 ---
