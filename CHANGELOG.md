@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.4
+
+### Added
+- `send --reply-to ID`: send as a reply to a message (thread it in groups).
+  Falls back to a plain message when the original is gone; JSON reports
+  `sent.reply_to` (the id, or `null` after the fallback). `--` ends options,
+  so text starting with dashes is sent verbatim.
+
 ## 1.1.3
 
 ### Added

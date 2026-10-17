@@ -191,6 +191,17 @@ python3 telegram_tool.py send 123456789 Message text here
 
 Everything after the address is the message text.
 
+Reply to a specific message (the id is the `#4215` shown by `read`, `updates`):
+
+```bash
+python3 telegram_tool.py send @group --reply-to 4215 Agreed, let's do it
+python3 telegram_tool.py send @user -- --this text starts with dashes
+```
+
+Options are read only right after the address; `--` ends them. If the message
+to reply to no longer exists, the text is sent without the reply and
+`sent.reply_to` is `null` in JSON.
+
 ### `unread` — dialogs with unread messages
 
 ```bash
