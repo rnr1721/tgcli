@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-__version__ = '1.1.3'
+__version__ = '1.1.4'
 
 try:
     from telethon import TelegramClient, utils
@@ -672,21 +672,58 @@ async def cmd_read(target, limit='15'):
     emit({'chat': entity_dict(entity), 'messages': [message_dict(m) for m in messages]}, render)
 
 
+def _split_send_args(words):
+    """
+    send <target> [--reply-to ID] [--] <text...>
+
+    Options are only read right after the target, and `--` ends them, so a
+    message that itself starts with "--reply-to" can still be sent verbatim.
+    """
+    words = list(words)
+    reply_to = None
+    while words:
+        if words[0] == '--':
+            words.pop(0)
+            break
+        if words[0] == '--reply-to':
+            if len(words) < 2:
+                raise usage_error('--reply-to needs a message id')
+            reply_to = to_int(words[1], '--reply-to', 1)
+            del words[:2]
+            continue
+        break
+    return reply_to, ' '.join(words)
+
+
 async def cmd_send(target, *words):
-    """Send a text message."""
-    text = ' '.join(words)
+    """Send a text message, optionally as a reply to one message."""
+    reply_to, text = _split_send_args(words)
     if not text.strip():
         raise usage_error('Message text is required')
+
+    reply_dropped = False
     async with connected() as client:
         entity = await resolve_entity(client, target)
-        sent   = await client.send_message(entity, text)
+        try:
+            sent = await client.send_message(entity, text, reply_to=reply_to)
+        except Exception as e:
+            # The message to reply to is gone (deleted, or a wrong id): the
+            # words still matter more than the thread — send them plainly.
+            if reply_to is None or 'REPLY' not in str(e).upper():
+                raise
+            reply_dropped = True
+            sent = await client.send_message(entity, text)
 
     def render(_):
-        print(f"[OK] Sent → {display_name(entity)}: {text[:60]}")
+        thread = f" (reply to #{reply_to})" if reply_to and not reply_dropped else ''
+        print(f"[OK] Sent → {display_name(entity)}{thread}: {text[:60]}")
+        if reply_dropped:
+            print(f"  [WARN] message #{reply_to} not found — sent without reply")
 
-    emit({'chat': entity_dict(entity),
-          'sent': {'id': sent.id, 'date': sent.date, 'peer_id': getattr(sent, 'chat_id', None)}},
-         render)
+    sent_info = {'id': sent.id, 'date': sent.date, 'peer_id': getattr(sent, 'chat_id', None)}
+    if reply_to is not None:
+        sent_info['reply_to'] = None if reply_dropped else reply_to
+    emit({'chat': entity_dict(entity), 'sent': sent_info}, render)
 
 
 async def cmd_search(target, *words):
@@ -1477,7 +1514,7 @@ Telegram Tool (tgcli {__version__}) — commands:
   contacts                               List saved contacts (address book)
   resolve   <query...>                   Find real targets by name/@username/id
   read      <@chat|id> [N]               Last N messages (default 15)
-  send      <@user|id> <text...>         Send a message
+  send      <@user|id> [--reply-to ID] <text...>   Send (optionally as a reply)
   unread    [N]                          Dialogs with unread messages
   search    <@chat|id> <query...>        Search messages in a chat
   info      <@user|channel|id>           Info about a user, group or channel
@@ -1567,7 +1604,7 @@ USAGE = {
     'contacts':      'contacts',
     'resolve':       'resolve <query...>',
     'read':          'read <@chat|id> [N]',
-    'send':          'send <@user|id> <text...>',
+    'send':          'send <@user|id> [--reply-to ID] [--] <text...>',
     'unread':        'unread [N]',
     'search':        'search <@chat|id> <query...>',
     'info':          'info <@user|channel|id>',

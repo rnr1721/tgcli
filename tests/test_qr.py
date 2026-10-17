@@ -195,3 +195,73 @@ class QrCliTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SendArgsTest(unittest.TestCase):
+    def test_plain_text(self):
+        self.assertEqual((None, 'hello world'), tt._split_send_args(['hello', 'world']))
+
+    def test_reply_to(self):
+        self.assertEqual((4215, 'да, согласна'), tt._split_send_args(['--reply-to', '4215', 'да,', 'согласна']))
+
+    def test_double_dash_protects_text(self):
+        self.assertEqual((None, '--reply-to is a flag'), tt._split_send_args(['--', '--reply-to is a flag']))
+        self.assertEqual((7, '-- hi'), tt._split_send_args(['--reply-to', '7', '--', '-- hi']))
+
+    def test_options_only_right_after_target(self):
+        self.assertEqual((None, 'see --reply-to 5'), tt._split_send_args(['see', '--reply-to', '5']))
+
+    def test_bad_reply_id(self):
+        with self.assertRaises(tt.CliError):
+            tt._split_send_args(['--reply-to', 'abc', 'hi'])
+        with self.assertRaises(tt.CliError):
+            tt._split_send_args(['--reply-to'])
+
+
+class SendReplyFallbackTest(unittest.TestCase):
+    """A reply to a vanished message still delivers the words."""
+
+    def setUp(self):
+        self._saved = (tt.connected, tt.resolve_entity, tt.OUTPUT_JSON)
+        tt.OUTPUT_JSON = True
+
+    def tearDown(self):
+        tt.connected, tt.resolve_entity, tt.OUTPUT_JSON = self._saved
+
+    def run_send(self, client, *args):
+        import io
+        from contextlib import redirect_stdout
+
+        @asynccontextmanager
+        async def fake_connected(require_auth=True, creds=None):
+            yield client
+
+        async def fake_resolve(c, target):
+            return SimpleNamespace(id=42, first_name='Eugeny', last_name=None, username='e', title=None)
+
+        tt.connected, tt.resolve_entity = fake_connected, fake_resolve
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            asyncio.run(tt.cmd_send('@e', *args))
+        return json.loads(buf.getvalue()), client.calls
+
+    class Client:
+        def __init__(self, fail_reply=False):
+            self.calls, self.fail_reply = [], fail_reply
+
+        async def send_message(self, entity, text, reply_to=None):
+            self.calls.append((text, reply_to))
+            if reply_to is not None and self.fail_reply:
+                raise Exception('The specified reply_to_msg_id is invalid (REPLY_MESSAGE_ID_INVALID)')
+            return SimpleNamespace(id=99, date=datetime(2026, 10, 17, tzinfo=timezone.utc), chat_id=42)
+
+    def test_reply_is_sent_as_reply(self):
+        out, calls = self.run_send(self.Client(), '--reply-to', '71', '--', 'привет')
+        self.assertEqual([('привет', 71)], calls)
+        self.assertEqual(71, out['sent']['reply_to'])
+
+    def test_missing_target_message_falls_back_to_plain(self):
+        out, calls = self.run_send(self.Client(fail_reply=True), '--reply-to', '71', '--', 'привет')
+        self.assertEqual([('привет', 71), ('привет', None)], calls)
+        self.assertIsNone(out['sent']['reply_to'])
+        self.assertTrue(out['ok'])
